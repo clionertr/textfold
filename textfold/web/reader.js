@@ -161,7 +161,7 @@
         const first = out.find((x) => !x.gap && x.tok);
         if (first) {
           const tk = typeof first.tok === "string" ? { t: first.tok } : first.tok;
-          first.tok = { ...tk, t: v.glue + (tk.t || "") };
+          first.tok = { ...(typeof tk === 'string' ? { t: tk } : tk), t: v.glue + tTok(tk) };
         }
       }
     } else {
@@ -227,13 +227,13 @@
   const hlCls = (p) => (HL[p.hl] || '') + (p.hl && p.sh && p.sh !== 2 ? ` sh${p.sh}` : '');
   function fill(el, p) {
     const t = p.tok || {};
-    const key = p.gap ? 'gap' : `${t.a || ''}\u0001${t.x || ''}\u0001${t.t || ''}\u0001${t.f || ''}`;
+    const key = p.gap ? 'gap' : `${t.a || ''}\u0001${t.x || ''}\u0001${tTok(t)}\u0001${t.f || ''}`;
     if (el._k !== key) {
       el._k = key;
       if (p.gap) { el.textContent = '…'; }
-      else if (t.a) { el.innerHTML = A[t.a].html; }
+      else if (t.a) { el.innerHTML = lazyImg(A[t.a].html); }
       else if (t.x) { el.textContent = t.x; tex(el, t.x); }
-      else { el.textContent = t.t; }
+      else { el.textContent = tTok(t); }
       el.className = 'tk' + (p.gap ? ' gap' : '') + atCls(t) + (t.f ? ' ' + t.f : '');
       el._base = el.className;
     }
@@ -246,7 +246,7 @@
   const CJK = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;   // Han and kana break anywhere
   const CLOSE = /^[，。、；：！？）」』”’》%,.;:!?)\]]/;
   const OPEN = /[（「『“‘《([]$/;
-  const textOf = (p) => p.gap ? '…' : (p.tok.t || 'A');
+  const textOf = (p) => p.gap ? '…' : (tTok(p.tok) || 'A');
   function glued(p, q, cut) {
     const a = textOf(p), b = textOf(q);
     if (CLOSE.test(b) || OPEN.test(a)) return true;
@@ -267,14 +267,15 @@
         const ends = new Set();
         if (thaiSeg) for (const w of thaiSeg.segment(text)) ends.add(w.index + w.segment.length);
         let at = 0;
-        run.forEach((n) => { at += pcs[n].tok.t.length; if (!thaiSeg || ends.has(at)) cuts.add(n); });
+        run.forEach((n) => { at += tTok(pcs[n].tok).length; if (!thaiSeg || ends.has(at)) cuts.add(n); });
         if (run[0] > 0) cuts.add(run[0] - 1);
         cuts.add(run[run.length - 1]);
       }
       run = []; text = '';
     };
     pcs.forEach((p, n) => {
-      if (p.tok && p.tok.t && THAI.test(p.tok.t)) { run.push(n); text += p.tok.t; if (p.tok.s) flush(); }
+      const tt = tTok(p.tok);
+      if (p.tok && tt && THAI.test(tt)) { run.push(n); text += tt; if (p.tok.s) flush(); }
       else flush();
     });
     flush();
@@ -333,6 +334,7 @@
   }
 
   // the same pieces as text: runs of equal styling become one span, formulas stay as they are
+  function lazyImg(h) { return h && h.includes('<img ') ? h.replace(/<img /g, '<img decoding="async" ') : h; }
   function textHtml(uid, L) {
     const pcs = pieces(uid, L);
     let html = '', run = null, buf = '';
@@ -341,14 +343,15 @@
       const t = p.tok || {};
       const cls = p.gap ? 'tr gap' : `tr${p.lead ? ' lead' : ''}${p.kept ? ' kept' : ''}${t.f ? ' ' + t.f : ''}${hlCls(p)}${fdCls(p)}`;
       if (cls !== run) { flush(); run = cls; }
-      buf += p.gap ? '…' : t.a ? A[t.a].html : t.x ? `<span class="texsrc">${esc(t.x)}</span>` : esc(t.t);
+      buf += p.gap ? '…' : t.a ? A[t.a].html : t.x ? `<span class="texsrc">${esc(t.x)}</span>` : esc(tTok(t));
       if (n < pcs.length - 1 && (p.gap || t.s || pcs[n + 1].gap)) {
         if ((p.hl && !pcs[n + 1].hl) || (p.fd && !pcs[n + 1].fd)) { flush(); run = null; }   // a highlight ends on its last word, not the space after it
         buf += ' ';
       }
     });
     flush();
-    return html;
+    virtSoon(600);   // the text of every section may have changed size: let the far ones go again
+    return lazyImg(html);
   }
 
   // ── math the model wrote that matches no formula of the unit: KaTeX, from where the page keeps it (D.katex: the
@@ -365,9 +368,25 @@
     });
     return katexReady;
   }
+  const KATEX_BUILD = /^(?:mord|mbin|mrel|mop|mopen|mclose|mpunct|minner|mtight|nobreak|allowbreak|delimsizinginner)$/;
+  const KB = 'mord|mbin|mrel|mop|mopen|mclose|mpunct|minner|mtight|nobreak|allowbreak|delimsizinginner';
+  const katexWrap = new RegExp(`<span class="(?:${KB})(?: (?:${KB}))*">([^<>]*)</span>`, 'g');
+  const katexHusk = new RegExp(`<span class="(?:${KB})(?: (?:${KB}))*"></span>`, 'g');
+  function katexSlim(html) {
+    if (!html || html.indexOf('<span') < 0) return html;
+    for (let i = 0; i < 8; i++) {   // innermost first: what a wrapper held becomes text, and it goes on the next turn
+      const before = html;
+      html = html.replace(katexHusk, '').replace(katexWrap, '$1');
+      if (html === before) break;
+    }
+    return html.replace(/ ?class="([^"]*)"/g, (m, c) => {
+      const keep = c.split(/\s+/).filter((x) => x && !KATEX_BUILD.test(x));
+      return keep.length ? ` class="${keep.join(' ')}"` : '';
+    });
+  }
   function tex(el, src) {
-    if (katexLib) { try { katexLib.render(src, el, { throwOnError: false }); } catch { /* keep the source */ } return; }   // loaded: at once, so it is measured drawn
-    loadKatex().then((k) => { if (k) try { k.render(src, el, { throwOnError: false }); } catch { /* keep the source */ } });
+    if (katexLib) { try { el.innerHTML = katexSlim(katexLib.renderToString(src, { throwOnError: false, output: 'html' })); } catch { /* keep the source */ } return; }   // loaded: at once, so it is measured drawn
+    loadKatex().then((k) => { if (k) try { el.innerHTML = katexSlim(k.renderToString(src, { throwOnError: false, output: 'html' })); } catch { /* keep the source */ } });
   }
   // ── formulas written in LaTeX (semantic.py: math.pf-tex, a Markdown file's): drawn by KaTeX, as Typora draws them
   //    with MathJax, once, before anything is laid out; the page has KaTeX before this script (build.py). Without it,
@@ -378,7 +397,7 @@
     return html.replace(/<math\b([^>]*)>[\s\S]*?<\/math>/g, (m, attrs) => {
       const src = /\balttext="([^"]*)"/.exec(attrs);
       if (!/\bclass="pf-tex"/.test(attrs) || !src) return m;
-      try { return katexLib.renderToString(attrText(src[1]), { displayMode: /\bdisplay="block"/.test(attrs), throwOnError: false }); } catch { return m; }
+      try { return katexSlim(katexLib.renderToString(attrText(src[1]), { displayMode: /\bdisplay="block"/.test(attrs), throwOnError: false, output: 'html' })); } catch { return m; }
     });
   }
   for (const a of Object.values(A)) if (a.kind === 'math') a.html = drawTex(a.html);
@@ -424,8 +443,11 @@
   }
 
   // ── skeleton ─────────────────────────────────────────────────────────
-  function h(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+  function h(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = lazyImg(html); return e; }
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // a token that carries nothing but its text comes as that text (the page packs the 97% of them that do): far less to
+  // parse and to keep than {"t": "…"}. Every reader of a token's text goes through here
+  const tTok = (t) => (typeof t === 'string' ? t : (t && t.t !== undefined ? t.t : ''));
   const flipName = (n) => { const p = n.split(',').map((x) => x.trim()); return p.length === 2 ? `${p[1]} ${p[0]}` : n; };
   // a title the model translated keeps $...$: show the heading's own formula when it matches, else KaTeX
   function mathify(text, refHtml) {
@@ -442,15 +464,15 @@
   const texify = (root) => root.querySelectorAll('.texsrc').forEach((e) => { e.classList.remove('texsrc'); tex(e, e.textContent); });
   function tokEl(tk, cls) {
     const s = h('span', 'tk' + atCls(tk) + (cls ? ' ' + cls : ''));
-    if (tk.a) s.innerHTML = A[tk.a].html;
+    if (tk.a) s.innerHTML = lazyImg(A[tk.a].html);
     else if (tk.x) { s.textContent = tk.x; tex(s, tk.x); }
-    else s.textContent = tk.t;
+    else s.textContent = tTok(tk);
     return s;
   }
   function toksHtml(toks) {
     let s = '';
     toks.forEach((t, i) => {
-      s += t.a ? A[t.a].html : t.x ? `<span class="texsrc">${esc(t.x)}</span>` : esc(t.t);
+      s += t.a ? A[t.a].html : t.x ? `<span class="texsrc">${esc(t.x)}</span>` : esc(tTok(t));
       if (t.s && i < toks.length - 1) s += ' ';
     });
     return s;
@@ -691,8 +713,7 @@
     }
     for (const b of lvBlocks) {
       if (!band || band.has(b)) { b.dataset.l = level; b._stale = false; } else { b._stale = true; staleQ.push(b); }
-    }
-  }
+    }  }
   // what is stale but the change has brought on screen is drawn now (the shrinking text pulled it in)
   function drawStaleInView(M) {
     let drew = false;
@@ -734,10 +755,26 @@
   }
 
   // units within `above` px over and `below` px under the viewport
+  // the sections a band can touch, and the units inside them: 342 boxes read instead of one per paragraph, many
+  // times a second while the page renders; the units that sit outside any section are appended as well
+  function secsNear(above, below) {
+    const out = [];
+    for (const sec of docEl.querySelectorAll('section.chunk')) {
+      const r = sec.getBoundingClientRect();
+      if ((r.width || r.height) && r.bottom > -above && r.top < innerHeight + below) out.push(sec);
+    }
+    return out;
+  }
+  function unitsIn(secs) {
+    const out = [];
+    for (const sec of secs) for (const el of sec.querySelectorAll('.u')) if (el.dataset.u) out.push([el.dataset.u, el]);
+    for (const el of docEl.children) if (el.classList && el.classList.contains('u') && el.dataset.u) out.push([el.dataset.u, el]);
+    return out;
+  }
   function unitsNear(above, below, withBlocks = false) {
     const out = new Set();
     const ok = (el) => { const r = el.getBoundingClientRect(); return (r.width || r.height) && r.bottom > -above && r.top < innerHeight + below; };
-    for (const [uid, el] of unitEl) if (ok(el)) out.add(uid);
+    for (const [uid, el] of unitsIn(secsNear(above, below))) if (ok(el)) out.add(uid);
     // a hidden block has no box: judge it by the unit before it
     if (withBlocks) { const ids = [...order.keys()]; for (const b of lvBlocks) if (ok(b) || out.has(ids[b._pos ?? 0])) out.add(b); }
     return out;
@@ -956,6 +993,7 @@
     for (const a of tr.anims) a.cancel();
     ghostEl.replaceChildren();
     tr = null;
+    virtSoon(0);   // the sections released at the old level measure themselves again
   }
   function revert() {   // back where it started: the old level is drawn again under the reader
     const { from, anchor } = tr;
@@ -1317,7 +1355,7 @@
   function captureHere() {
     const H = innerHeight, sy = scrollY, lo = sy - H, hi = sy + 2 * H;
     const near = new Set();
-    for (const [uid, el] of unitEl) { const r = el.getBoundingClientRect(); if ((r.width || r.height) && r.bottom + sy > lo && r.top + sy < hi) near.add(uid); }
+    for (const [uid, el] of unitsIn(secsNear(H, 2 * H))) { const r = el.getBoundingClientRect(); if ((r.width || r.height) && r.bottom + sy > lo && r.top + sy < hi) near.add(uid); }
     if (!near.size) return;
     for (const uid of near) if (unitEl.get(uid)._mode !== 'tok') renderUnit(uid, true);
     const got = collect(docEl, [...near].map((u) => [u, unitEl.get(u)]), lo, hi, scrollY, level, false);
@@ -1343,6 +1381,7 @@
     };
     const plain = (el) => { el.classList.remove('linked', 'focal', 'flash', 'local-open'); return el; };
     function copy(node) {
+      if (VIRT.held.has(node)) virtAttach(node);   // its children wait in a fragment: put them back before copying
       const cl = node.classList;
       if (cl.contains('u')) {
         const uid = node.dataset.u;
@@ -1437,7 +1476,7 @@
   function visibleCands() {
     const H = innerHeight, out = [];
     const add = (el, key, idx) => { const r = el.getBoundingClientRect(); if ((r.width || r.height) && r.bottom > 0 && r.top < H) out.push({ el, key, idx, T: r.top, Hc: r.height, X: r.left }); };
-    for (const [uid, el] of unitEl) add(el, uid, order.get(uid));
+    for (const [uid, el] of unitsIn(secsNear(0, 0))) add(el, uid, order.get(uid));
     for (const [, hd] of headEls) add(hd, hd.dataset.id, HEAD_IDX.get(hd));
     return out;
   }
@@ -1484,7 +1523,16 @@
   }
 
   // while the reader is still: the next keyframe that is missing, one per task, nearest level first
-  function warmSoon(ms = 360) { clearTimeout(warmTimer); if (!reduced) warmTimer = setTimeout(warm, ms); }
+  // warming lays out a sandbox copy of the paper for the levels a zoom may go to: it must never stand between the
+  // reader and the page, so it waits for an idle moment (warm() itself re-checks scrolling, hidden, busy, the stage)
+  function warmSoon(ms = 360) {
+    clearTimeout(warmTimer);
+    if (reduced) return;
+    warmTimer = setTimeout(() => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(() => warm(), { timeout: 1500 });
+      else warm();
+    }, ms);
+  }
   function warm() {
     if (busy || stage || tr || drag || holding || localLevel.size || staleQ.length || document.hidden) return;
     if (performance.now() - lastScrollT < 180) return warmSoon(200);
@@ -1672,7 +1720,7 @@
   addEventListener('scroll', () => {
     lastScrollT = performance.now();
     if (stage && Math.abs(scrollY - stage.sy) > 1) snapNow();
-    if (!busy) { hydrateSoon(); warmSoon(200); }   // a fifth of a second still: the reader stopped there
+    if (!busy) { hydrateSoon(); warmSoon(200); virtOnScroll(); }   // a fifth of a second still: the reader stopped there
   }, { passive: true });
   addEventListener('pointermove', (e) => { lastPointer = { x: e.clientX, y: e.clientY }; if (level < 4 && !busy) warmSoon(); }, { passive: true });
 
@@ -1682,7 +1730,7 @@
     if (busy) { queued = () => setLang(l); return; }
     store.set('dr-lang', l);
     readerLang = l; ui = I18N.uiFor(l); store.set(UI_KEY, l);   // the interface goes with the text (in English when it has no words for it)
-    if (D.app) history.replaceState(null, '', `?lang=${encodeURIComponent(l)}${location.hash}`);
+    if (D.app) { const q = new URLSearchParams(location.search); q.set('lang', l); history.replaceState(null, '', `?${q}${location.hash}`); }
     const hot = unitsNear(innerHeight * 1.5, innerHeight * 1.5);
     const band = level === 0 ? null : bandAround(defaultAnchor(), { 4: 30, 3: 45, 2: 60, 1: 150 }[level], hot);
     morph(() => { lang = l; applyLang(); renderAll(hot, band); }, defaultAnchor());
@@ -2100,7 +2148,7 @@
   }
 
   // ── a selection, as anchors (one per paragraph it touches) ──
-  const tokPlain = (t) => (t.a ? (A[t.a].kind === 'math' ? `$${A[t.a].alt}$` : (A[t.a].text || '')) : t.x ? `$${t.x}$` : (t.t || ''));
+  const tokPlain = (t) => (t.a ? (A[t.a].kind === 'math' ? `$${A[t.a].alt}$` : (A[t.a].text || '')) : t.x ? `$${t.x}$` : (tTok(t) || ''));
   function toksText(toks, a, b, spaceAfter = false, spaceBefore = false) {   // tokens a..b as text, with their spaces
     let s = '';
     for (let i = a; i <= b; i++) { s += tokPlain(toks[i]); if (toks[i].s && (i < b || spaceAfter)) s += ' '; }
@@ -2698,6 +2746,9 @@
     if (u && !n && !unitEl.has(u)) { s = (GONE.units[u] || {}).section || arg('s'); u = null; lost = true; }
     if (s && !secs.get(s)) { const now = (GONE.sections[s] || {}).now; s = now && secs.get(now) ? now : null; lost = lost || !s; }
     const sc = s && secs.get(s);
+    if (u) virtShow(u);
+    else if (n && n.anchor.unit) virtShow(n.anchor.unit);
+    if (sc && VIRT.held.has(sc.sec)) virtAttach(sc.sec);
     if (lost) sayLink(sc ? T[ui].link_gone : T[ui].link_gone_top);
     // an equation (#eq=, with the paragraph it goes with as u=): itself, where the level shows it, else that paragraph
     const eqId = !n && arg('eq'), eqEl = eqId ? eqEls.find((x) => x.dataset.eq === eqId && x.getClientRects().length) : null;
@@ -3002,10 +3053,18 @@
       `<div class="ty-row"><span class="ty-l">${esc(t.ty_margin)}</span><div class="ty-seg ty-checks" role="group" aria-label="${esc(t.ty_margin)}">` +
       MARGINS.map((k) => `<button type="button" aria-pressed="${!type.hide.includes(k)}" data-margin="${k}">${esc(t[`ty_m_${k}`])}</button>`).join('') + '</div></div>' +
       hueRows(t) +
+      `<div class="ty-row"><span class="ty-l">${esc(t.ty_perf || (String(readerLang).startsWith('zh') ? '性能' : 'Performance'))}</span><div class="ty-seg ty-checks" role="group">` +
+      `<button type="button" aria-pressed="${perfGet('pack')}" data-perf="pack">${esc(t.ty_pack || (String(readerLang).startsWith('zh') ? '紧凑数据' : 'Packed data'))}</button>` +
+      `<button type="button" aria-pressed="${VIRT.on}" data-perf="virt">${esc(t.ty_virt || (String(readerLang).startsWith('zh') ? '虚拟化' : 'Virtualize'))}</button></div></div>` +
       `<div class="ty-foot"><span class="ty-modes"><button type="button" class="ty-focus" data-focus="1">${esc(focusOn ? t.ty_focus_off : t.ty_focus)}<kbd>F</kbd></button>` +
       (canFull ? `<button type="button" class="ty-focus" data-full="1">${esc(fullOn ? t.ty_full_off : t.ty_full)}<kbd>${FULL_KEY}</kbd></button>` : '') + '</span>' +
       `<button type="button" class="ty-reset"${isType0() ? ' hidden' : ''}>${esc(t.ty_reset)}</button></div>`;
   }
+  typeMenu.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-perf]');
+    if (!b) return;
+    if (b.dataset.perf === 'pack') setPack(!perfGet('pack')); else setVirt(!VIRT.on);
+  });
   // the colour of the highlights made at each level, among the hues; two levels of one colour are said to be (a
   // highlight no longer tells where it was made)
   function hueRows(t) {
@@ -3915,7 +3974,7 @@ math { font-size: 1.05em; }
   function locate(uid) {
     if (cmp.layout) return cmp.layout.get(uid) || null;
     if (cmp.spans.has(uid)) return cmp.spans.get(uid);
-    const u = U[uid], uw = u ? u.toks.filter((t) => t.t).map((t) => pdfNorm(t.t)).filter(Boolean) : [];
+    const u = U[uid], uw = u ? u.toks.filter((t) => tTok(t)).map((t) => pdfNorm(tTok(t))).filter(Boolean) : [];
     const hitsOf = (i) => { const a = cmp.grams.get(`${uw[i]} ${uw[i + 1]} ${uw[i + 2]}`); return a && a.length <= 30 ? a : null; };
     let span = null;
     if (uw.length >= 3) {
@@ -4715,7 +4774,101 @@ math { font-size: 1.05em; }
     clearTimeout(relayoutTimer);
     relayoutTimer = setTimeout(() => { const t0 = performance.now(); layoutSides(); perf('sides', t0); }, 30);
   }
-  addEventListener('resize', () => { snapNow(); capEpoch++; relayout(); geom = null; placeThumb(); warmSoon(); });
+  addEventListener('resize', () => { snapNow(); capEpoch++; relayout(); geom = null; placeThumb(); warmSoon(); virtSoon(0); });
+  addEventListener('beforeprint', () => { virtRestore(); });          // paper cannot see a DocumentFragment
+  addEventListener('afterprint', () => { virtSoon(0); });
+
+  // ── performance switches (Aa): a packed page (its tokens as text, which needs a reload: the data comes inside the
+  //    HTML), and virtualization below. Kept in localStorage so they follow the reader, not one tab ──
+  function perfGet(k) { try { const o = JSON.parse(localStorage.getItem('tf-perf') || '{}') || {}; return o[k] === 1; } catch { return false; } }
+  function perfSet(k, v) { try { const o = JSON.parse(localStorage.getItem('tf-perf') || '{}') || {}; o[k] = v ? 1 : 0; localStorage.setItem('tf-perf', JSON.stringify(o)); } catch { /* private window */ } }
+
+  // ── virtualization: a section far from the screen hands its insides to a detached holder, so that the browser stops
+  //    styling, laying out and painting it; they come back when it comes near. Its box keeps its measured height, so the
+  //    scrollbar, the reading position and a jump to a section stay true. Text in a detached section is out of reach of
+  //    the browser's own find until it is back: the reader's find, a selection or an open paragraph puts it all back ──
+  const VIRT = { on: false, far: 4, near: 2.2, held: new Map(), timer: 0 };
+  function virtDetach(sec) {
+    const h = sec.offsetHeight;
+    if (!h || VIRT.held.has(sec)) return;
+    const frag = document.createDocumentFragment();
+    while (sec.firstChild) frag.appendChild(sec.firstChild);
+    VIRT.held.set(sec, { frag, h, key: `${capKey()}|${level}`, style: sec.style.height });
+    sec.style.height = `${h}px`;
+    sec.classList.add('virt');
+  }
+  function virtAttach(sec) {
+    const held = VIRT.held.get(sec);
+    if (!held) return;
+    sec.style.height = held.style || '';
+    sec.classList.remove('virt');
+    sec.appendChild(held.frag);
+    VIRT.held.delete(sec);
+  }
+  function virtRestore() { for (const sec of [...VIRT.held.keys()]) virtAttach(sec); }
+  function virtSweep() {
+    if (!VIRT.on) return;
+    if (document.hidden) return;
+    if (busy || stage || tr || drag || holding || localLevel.size || staleQ.length) return virtSoon(500);   // once the page is still
+    if (typeof fbar !== 'undefined' && fbar && !fbar.hidden) return virtRestore();   // the browser's own find must see the text
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return virtRestore();                              // a selection keeps its text
+    const k0 = `${capKey()}|${level}`;
+    if ([...VIRT.held.values()].some((h) => h.key !== k0)) {   // the layout moved on: a plain page, drawn afresh, then released again
+      virtRestore();
+      renderAll();
+      virtSoon(900);
+      return;
+    }
+    const H = innerHeight, far = VIRT.far * H, near = VIRT.near * H;
+    const plan = [];
+    for (const sec of docEl.querySelectorAll('section.chunk')) {
+      const r = sec.getBoundingClientRect();
+      plan.push([sec, r.top > H ? r.top - H : (r.bottom < 0 ? -r.bottom : 0)]);
+    }
+    for (const [sec, beyond] of plan) {
+      if (!VIRT.held.has(sec) && beyond > far) virtDetach(sec);
+      else if (VIRT.held.has(sec) && beyond < near) virtAttach(sec);
+    }
+  }
+  let virtRaf = 0;
+  function virtMount() {
+    if (!VIRT.on || !VIRT.held.size) return;
+    if (busy || stage || tr || drag || holding) return;
+    const H = innerHeight, near = VIRT.near * H;
+    for (const [sec] of [...VIRT.held]) {
+      const r = sec.getBoundingClientRect();
+      if (r.bottom > -near && r.top < H + near) virtAttach(sec);
+    }
+  }
+  function virtOnScroll() {
+    if (!VIRT.on) return;
+    if (!virtRaf) virtRaf = requestAnimationFrame(() => { virtRaf = 0; virtMount(); virtSoon(220); });
+  }
+  // a unit the reader is about to show (a link, the saved position) brings its section back first
+  const unitSec = new Map();
+  function virtShow(uid) {
+    if (!VIRT.on || !VIRT.held.size) return;
+    const sec = unitSec.get(uid);
+    if (sec && VIRT.held.has(sec)) virtAttach(sec);
+  }
+  function virtSoon(ms = 140) {
+    if (!VIRT.on) return;
+    clearTimeout(VIRT.timer);
+    VIRT.timer = setTimeout(virtSweep, ms);
+  }
+  function setVirt(on) {
+    VIRT.on = !!on;
+    perfSet('virt', VIRT.on);
+    if (VIRT.on) virtSoon(0); else virtRestore();
+    renderTypeMenu();
+  }
+  function setPack(on) {
+    perfSet('pack', !!on);
+    const u = new URL(location.href);                       // the data comes inside the page: fetch it again, packed
+    if (on) u.searchParams.set('pack', '1'); else u.searchParams.delete('pack');
+    location.replace(u.toString());
+  }
 
   // ── start ────────────────────────────────────────────────────────────
   build();
@@ -4757,10 +4910,16 @@ math { font-size: 1.05em; }
   docEl.dataset.level = level;
   document.documentElement.dataset.level = level;
   pos = goal = level;
+  try {
+    if (D.app && perfGet('pack') && !new URLSearchParams(location.search).has('pack')) {   // the page carries its data: reload packed
+      const u = new URL(location.href); u.searchParams.set('pack', '1'); location.replace(u.toString()); return;
+    }
+  } catch { /* private window */ }
   applyLang();
   renderAll();
   updateBar();
   relayout();
+  if (perfGet('virt')) { VIRT.on = true; virtSoon(600); }
   if (document.fonts) {
     document.fonts.ready.then(() => { capEpoch++; relayout(); geom = null; placeThumb(); warmSoon(30); });   // the keyframes, as soon as the type is in
     document.fonts.addEventListener('loadingdone', () => { capEpoch++; warmSoon(); });
@@ -4772,7 +4931,11 @@ math { font-size: 1.05em; }
   warmSoon(600);
   loadNotes();
   try { if (PDF_OK && innerWidth >= 1100 && localStorage.getItem(CMP_KEY) === '1') openCompare(); } catch { /* private window */ }
+  // which section holds which unit: a released section keeps its units in its fragment, where closest() cannot
+  // reach them, and a link or the saved position has to bring the section back before it can be scrolled to
+  for (const sec of docEl.querySelectorAll('section.chunk')) for (const el of sec.querySelectorAll('.u')) if (el.dataset.u) unitSec.set(el.dataset.u, sec);
   if (wasAt) {   // (once laid out; again once the type is in, which moves the lines)
+    virtShow(wasAt.u);
     const el = unitEl.get(wasAt.u), back = () => scrollBy(0, el.getBoundingClientRect().top - wasAt.y);
     requestAnimationFrame(() => {
       back();
@@ -4785,7 +4948,7 @@ math { font-size: 1.05em; }
     const k = JSON.parse(sessionStorage.getItem('pf-keep') || 'null');
     sessionStorage.removeItem('pf-keep');
     const el = k && k.pid === D.meta.id && unitEl.get(k.uid);
-    if (el) {
+    if (el) { virtShow(k.uid);
       const back = () => requestAnimationFrame(() => scrollBy(0, el.getBoundingClientRect().top - k.top));
       if (typeof k.level === 'number' && k.level !== level) { setLevel(k.level); setTimeout(back, DUR + 120); } else back();
     }

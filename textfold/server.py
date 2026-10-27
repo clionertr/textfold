@@ -502,7 +502,26 @@ def assembled(pid, only=None):
     return doc
 
 
-def reader_page(pid):
+def pack_tokens(doc):
+    """A token that carries nothing but its text is sent as that text: on a Chinese book that is 97% of them, and a
+    string costs a browser far less to parse and to keep than {"t": "…"} does (TextFold 0.10.37, `?pack=1`)."""
+    def packed(toks):
+        if not isinstance(toks, list):
+            return toks
+        return [t["t"] if isinstance(t, dict) and len(t) == 1 and "t" in t else t for t in toks]
+    for u in doc.get("units", {}).values():
+        if isinstance(u.get("toks"), list):
+            u["toks"] = packed(u["toks"])
+        for z in (u.get("tr") or {}).values():
+            if isinstance(z, dict) and isinstance(z.get("toks"), list):
+                z["toks"] = packed(z["toks"])
+    meta = doc.get("meta")
+    if isinstance(meta, dict):
+        meta["packed"] = True
+    return doc
+
+
+def reader_page(pid, packed=False):
     layers = store.pdir(pid) / "layers"
     sig = tuple(sorted((f.name, f.stat().st_mtime) for f in layers.glob("*.json"))) if layers.exists() else ()
     sig += ((build.WEB / "template.html").stat().st_mtime, library.name_of(pid))  # a changed page template, or name, re-renders too
@@ -510,10 +529,13 @@ def reader_page(pid):
     sig += (gone.stat().st_mtime_ns if gone.exists() else 0,)
     sig += tuple((name, (build.WEB / name).stat().st_mtime_ns) for name in STATIC)
     hit = PAGES.get(pid)
-    if not hit or hit[0] != sig:
-        hit = (sig, build.page(assembled(pid), app=True))
+    if not hit or hit[0] != sig or hit[1] != packed:
+        doc = assembled(pid)
+        if packed:
+            pack_tokens(doc)
+        hit = (sig, packed, build.page(doc, app=True))
         PAGES[pid] = hit
-    return hit[1]
+    return hit[2]
 
 
 def listed():
@@ -609,7 +631,8 @@ def make_handler(jobs):
                         self.end_headers()
                         return
                     library.opened(m.group(1))
-                    return self.send(200, reader_page(m.group(1)), "text/html; charset=utf-8")
+                    packed = parse_qs(u.query).get("pack") == ["1"]
+                    return self.send(200, reader_page(m.group(1), packed), "text/html; charset=utf-8")
                 if u.path.startswith("/static/") and u.path[8:] in STATIC:
                     data = (build.WEB / u.path[8:]).read_bytes()
                     version = hashlib.sha256(data).hexdigest()
